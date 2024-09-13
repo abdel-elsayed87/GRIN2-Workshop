@@ -1443,9 +1443,9 @@ default.grin.colors=function(lsn.types) # Unique lesion types as specified in th
   message("Computationally assigning lesion type colors for GRIN plots.")
   uniq.types=sort(unique(lsn.types))
   n.types=length(uniq.types)
-  default.colors=c("gold", "black", "red","blue",
-                   "purple", "olivedrab",
-                   "cyan", "brown",
+  default.colors=c("black", "red","blue",
+                    "olivedrab", "purple",
+                   "cyan", "brown", "gold", 
                    "orange","steelblue")
   if (length(n.types)>length(default.colors))
     stop(paste0("Too many lesion types for default grin colors; please assign colors manually."))
