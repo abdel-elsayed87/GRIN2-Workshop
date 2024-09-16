@@ -1,0 +1,324 @@
+---
+title: "GRIN2 Workshop"
+date:  '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
+    toc_float: TRUE
+author: "Stanley Pounds and Abdelrahman Elsayed"
+---
+
+## Initial Set-up
+
+```{r,echo=TRUE, message=FALSE, warning=FALSE}
+rm(list=ls());              # start with clean slate in R
+options(stringsAsFactors=F) # turn off the most annonying default in R
+```
+
+## Initial Setup and Specify a directory on your local machine
+
+```{r setup, include=F}
+
+knitr::opts_chunk$set(echo=T,error=T,eval=T)
+
+# Specify a directory on your local machine
+knitr::opts_knit$set(root.dir = normalizePath("C:/Users/aelsayed/Desktop/GRIN2_Workshop/"))
+
+# specify the directory with stored clinical, lesion and expression data
+data.dir="C:/Users/aelsayed/Desktop/GRIN2_Workshop/"
+
+```
+
+
+## Obtain Needed Packages and Call the Libraries (please install the packages as needed)
+
+```{r, message=FALSE, warning=FALSE}
+#install.packages("readxl")
+#install.packages("writexl")
+#install.packages("circlize")
+
+#if (!require("BiocManager", quietly = TRUE))
+  #install.packages("BiocManager") 
+#BiocManager::install("biomaRt")
+#BiocManager::install("ComplexHeatmap")
+#BiocManager::install("ensembldb")
+#BiocManager::install("Gviz")
+#BiocManager::install("EnsDb.Hsapiens.v75")
+#BiocManager::install("AnnotationHub")
+
+library(readxl)
+library(openxlsx)
+library(writexl)
+library(data.table)
+library(circlize)
+library(biomaRt)
+library(ComplexHeatmap)
+library(ggplot2)
+library(forcats)
+library(EnvStats)
+library(tidyverse)
+library(lubridate)
+library(GSDA)
+library(stringr)
+library(survival)
+library(dplyr)
+library(ensembldb)
+library(Gviz)
+library(gridGraphics)
+library(grid)
+library(EnsDb.Hsapiens.v75)
+library(AnnotationHub)
+
+```
+
+
+## T-ALL Example Study
+
+>- [Genomic Landscape of T-ALL](https://pubmed.ncbi.nlm.nih.gov/28671688/)
+>- RNA-seq and WES data for 265 patients identified 6,887 genomic lesions
+>- Clinical outcome data
+
+## 1) Prepare the Clinical Data (merge)
+
+```{r}
+# Read the TARGET clinical data from specified data directory
+
+clin.data <- "TARGET_clinical_data.xlsx"
+clinPath <- paste(data.dir, clin.data, sep = "//")
+target.clin.data <- read_xlsx(clinPath, sheet=1)
+target.clin.data=as.data.frame(target.clin.data)     
+
+# Read the clinical data in the supplementary materials
+supp.clin.data=read_xlsx(clinPath, sheet=2)       
+supp.clin.data=as.data.frame(supp.clin.data)         
+
+# Clean up the USI patient ID in the TARGET data
+target.clin.data$USI=gsub("TARGET-10-","",
+                          target.clin.data$`TARGET USI`,
+                          fixed=T)
+
+# Merge the two clinical data sets
+comb.clin.data=merge(target.clin.data,
+                     supp.clin.data,
+                     by="USI")
+
+```
+
+## Prepare the Clinical Data (clean up the column names after merging two files)
+
+```{r}
+# clean up the column names of the combined data set
+colnames(comb.clin.data)=gsub(".x","_TARGET",
+                              colnames(comb.clin.data),fixed=T)
+
+colnames(comb.clin.data)=gsub(".y","_supplement",
+                              colnames(comb.clin.data),fixed=T)
+
+colnames(comb.clin.data)=gsub("\r","",
+                              colnames(comb.clin.data),fixed=T)
+
+colnames(comb.clin.data)=gsub("\n","",
+                              colnames(comb.clin.data),fixed=T)
+
+colnames(comb.clin.data)=gsub(" ","_",                                                               colnames(comb.clin.data),fixed=T)
+```
+
+## Check Consistency Across Source Data
+
+```{r}
+all(comb.clin.data$Gender_supplement==
+      comb.clin.data$Gender_TARGET)
+
+table(paste(comb.clin.data$Race_TARGET,
+            comb.clin.data$Race_supplement,sep="_"))
+```
+
+
+## Simplify Clinical Data Column Names
+
+```{r}
+ex.clin.data=comb.clin.data[,c("USI","Gender_TARGET",
+                               "Race_TARGET","Ethnicity",
+                               "Age_at_Diagnosis_in_Days",
+                               "Year_of_Diagnosis",
+                               "WBC_at_Diagnosis",
+                               "MRD_Day_29",
+                               "Event_Free_Survival_Time_in_Days",
+                               "First_Event",
+                               "Overall_Survival_Time_in_Days",
+                               "Vital_Status")]
+
+colnames(ex.clin.data)=c("ID","Sex","Race","Ethnicity",
+                         "Age_Days","Year_Dx",
+                         "WBC","MRD29",
+                         "Event_Days","First_Event",
+                         "OS_Days","Vital_Status")
+
+```
+
+## Define MRD and Overall Survival
+
+```{r}
+ex.clin.data$MRD.binary=ifelse(ex.clin.data$MRD29<0.1, 0,
+                        ifelse(ex.clin.data$MRD29>=0.1, 1, NA))
+
+ex.clin.data$os.time=ex.clin.data$OS_Days/365.25
+
+ex.clin.data$os.censor=ifelse(ex.clin.data$Vital_Status=="Alive", 0,
+                              ifelse(ex.clin.data$Vital_Status=="Dead", 1, NA))
+```
+
+## Define Event-Free Survival
+
+```{r}
+ex.clin.data$efs.time=ex.clin.data$Event_Days/365.25
+
+ex.clin.data$efs.censor=ifelse(ex.clin.data$First_Event=="Censored", 0,
+                        ifelse(ex.clin.data$First_Event=="None", 0,  
+                        ifelse(ex.clin.data$First_Event=="Relapse",1,
+                        ifelse(ex.clin.data$First_Event=="Second Malignant Neoplasm",1, 
+                        ifelse(ex.clin.data$First_Event=="Progression",1,
+                        ifelse(ex.clin.data$First_Event=="Death",1, NA))))))
+
+```
+
+
+## 2) Prepare Genomic Lesion Data
+
+Format Genomic Lesion Data like Table 1 of the GRIN Paper
+
+ID            | chrom  | loc.start  | loc.end   | lsn.type |
+--------------|--------|------------|-----------|----------|
+PARZYX        |  2     | 23748      | 37845     | gain     |
+PARZYX        |  7     | 137873     | 432813    | loss     |
+
+
+
+## Read TARGET Lesion Data
+
+```{r}
+# Read the TARGET lesion data
+
+lesion.data <- "TARGET_lesion_data.xlsx"
+lsnPath <- paste(data.dir, lesion.data, sep = "//")
+ 
+```
+
+## Read Sequence Mutation Data
+
+```{r}
+
+SeqMut.data=read_xlsx(lsnPath, sheet=1)
+SeqMut.data=as.data.frame(SeqMut.data)
+
+```
+
+## Prepare Sequence Mutation Data in a GRIN Compatible Format (SNVs and short indels)
+
+```{r}
+SeqMut.lsns=cbind.data.frame(ID=SeqMut.data$sample,
+                             chrom=gsub("chr","",SeqMut.data$chromosome), 
+                             loc.start=SeqMut.data$start,
+                             loc.end=SeqMut.data$start,
+                             lsn.type="mutation")
+
+head(SeqMut.lsns)
+```
+
+
+## Read Fusion and Copy Number Data
+
+```{r}
+# Read the fusion data
+fusion.data=read_xlsx(lsnPath, sheet=2)
+fusion.data=as.data.frame(fusion.data)
+
+# Read the Copy Number Abnormality data
+CNA.data=read_xlsx(lsnPath, sheet=3)
+CNA.data=as.data.frame(CNA.data)
+
+```
+
+
+## Prepare Fusion Data
+
+>- We represent fusions with each break-point as a separate point event (one row in the data set).
+>- Other ways may better capture the biology, but seem somewhat arbitrary and difficult to automate.
+
+## Prepare Fusion Data (two rows for each fusion)
+
+```{r}
+fusion.lsnsA=cbind.data.frame(ID=fusion.data$sample,
+                              chrom=gsub("chr","",fusion.data$chr_a),
+                              loc.start=fusion.data$position_a,
+                              loc.end=fusion.data$position_a,
+                              lsn.type="fusion")
+
+fusion.lsnsB=cbind.data.frame(ID=fusion.data$sample,
+                              chrom=gsub("chr","",fusion.data$chr_b),
+                              loc.start=fusion.data$position_b,
+                              loc.end=fusion.data$position_b,
+                              lsn.type="fusion")
+
+fusion.lsns=rbind.data.frame(fusion.lsnsA,
+                             fusion.lsnsB)
+```
+
+## Fusion Data
+
+```{r}
+head(fusion.lsns[2:6,])
+```
+
+## Prepare Copy Number Data (cutoffs for gain and loss based on log2_ratio)
+
+```{r}
+CNA.lsns=cbind.data.frame(ID=CNA.data$Case,
+                          chrom=CNA.data$Chromosome,
+                          loc.start=CNA.data$Start,
+                          loc.end=CNA.data$End,
+                          lsn.type="copy.number")
+
+CNA.lsns$lsn.type[CNA.data$log2_Ratio<(-0.2)]="loss"
+CNA.lsns$lsn.type[CNA.data$log2_Ratio>(+0.2)]="gain"
+
+CNA.lsns$chrom=as.character(CNA.lsns$chrom)
+CNA.lsns$chrom=gsub("23","X",CNA.lsns$chrom)
+CNA.lsns$chrom=gsub("24","Y",CNA.lsns$chrom)
+```
+
+## Prepare Copy Number Data
+
+```{r}
+head(CNA.lsns)
+```
+
+## Combine Genomic Lesion Data
+
+```{r}
+
+lsn.data=rbind.data.frame(SeqMut.lsns,
+                          fusion.lsns,
+                          CNA.lsns)
+
+table(lsn.data$lsn.type)
+
+```
+
+
+## 3) Prepare RNA-Seq Data (log2 transformation)
+
+```{r}
+
+expr.data <- "TARGET_Expression_data.xlsx"
+exprPath <- paste(data.dir, expr.data, sep = "//")
+RNAseq.data=read_xlsx(exprPath, sheet=1)
+
+RNAseq.data=as.data.frame(RNAseq.data)
+rownames(RNAseq.data)=RNAseq.data[,1]
+RNAseq.data=RNAseq.data[,-1]
+RNAseq.data=as.matrix(RNAseq.data)
+RNAseq.data=log2(RNAseq.data+1)
+```
+
